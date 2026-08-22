@@ -29,6 +29,11 @@
       "import": "./dist/ethereum/index.mjs",
       "require": "./dist/ethereum/index.js",
       "types": "./dist/ethereum/index.d.ts"
+    },
+    "./cardano": {
+      "import": "./dist/cardano/index.mjs",
+      "require": "./dist/cardano/index.js",
+      "types": "./dist/cardano/index.d.ts"
     }
   },
   "files": [
@@ -38,9 +43,9 @@
   "scripts": {
     "?pack-release": "When https://github.com/changesets/changesets/issues/432 has a solution we can remove this trick",
     "pack-release": "rimraf ./_release && yarn pack && mkdir ./_release && tar zxvf ./package.tgz --directory ./_release && rm ./package.tgz",
-    "build": "rimraf ./dist && tsup src/index.ts src/solana/index.ts src/auto-confirm/index.ts src/ethereum/index.ts --format cjs,esm --dts",
-    "build:watch": "rimraf ./dist && tsup src/index.ts src/solana/index.ts src/auto-confirm/index.ts src/ethereum/index.ts --format cjs,esm --dts --watch",
-    "dev": "rimraf ./dist && tsup src/index.ts src/solana/index.ts src/auto-confirm/index.ts src/ethereum/index.ts --format cjs,esm --dts --watch",
+    "build": "rimraf ./dist && tsup src/index.ts src/solana/index.ts src/auto-confirm/index.ts src/ethereum/index.ts src/cardano/index.ts --format cjs,esm --dts",
+    "build:watch": "rimraf ./dist && tsup src/index.ts src/solana/index.ts src/auto-confirm/index.ts src/ethereum/index.ts src/cardano/index.ts --format cjs,esm --dts --watch",
+    "dev": "rimraf ./dist && tsup src/index.ts src/solana/index.ts src/auto-confirm/index.ts src/ethereum/index.ts src/cardano/index.ts --format cjs,esm --dts --watch",
     "lint": "tsc --noEmit && eslint --cache .",
     "check-types": "tsc --noEmit",
     "test": "jest",

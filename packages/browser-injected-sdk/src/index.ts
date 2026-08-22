@@ -32,3 +32,4 @@ export { createExtensionPlugin, type Extension } from "./extension";
 export { createEthereumPlugin, createSiweMessage } from "./ethereum";
 
 export { isInstalled as isPhantomExtensionInstalled } from "./extension/isInstalled";
+export { CardanoProvider } from "./cardano";
