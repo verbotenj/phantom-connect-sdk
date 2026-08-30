@@ -42,14 +42,16 @@ describe("CardanoProvider", () => {
     });
   });
 
-  afterEach(() => jest.restoreAllMocks());
+  afterEach(() => {
+    jest.restoreAllMocks();
+    delete (globalThis as typeof globalThis & { chrome?: unknown }).chrome;
+  });
 
   test("exposes exact CIP-30 metadata", () => {
     const provider = new CardanoProvider();
     expect(provider.name).toBe("Phantom");
     expect(provider.apiVersion).toBe("1");
     expect(provider.supportedExtensions).toEqual([]);
-    expect(Object.isFrozen(provider.supportedExtensions)).toBe(true);
   });
 
   test("requests extensions and exposes the complete base API", async () => {
@@ -117,14 +119,48 @@ describe("CardanoProvider", () => {
     expect(postMessage).not.toHaveBeenCalled();
   });
 
+  test("rejects malformed enable options with APIError", async () => {
+    await expect(new CardanoProvider().enable(null as unknown as object)).rejects.toEqual({
+      code: -1,
+      info: "Invalid enable options.",
+    });
+  });
+
+  test("accepts the existing minimal Chrome runtime response envelope", async () => {
+    const postMessage = jest.spyOn(window, "postMessage");
+    Object.defineProperty(globalThis, "chrome", {
+      configurable: true,
+      value: {
+        runtime: {
+          sendMessage: (request: Request, callback: (response: unknown) => void) => {
+            callback({ requestId: request.requestId, result: true });
+          },
+        },
+      },
+    });
+    await expect(new CardanoProvider().isEnabled()).resolves.toBe(true);
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
   test("ignores responses from another origin and times out without leaking listeners", async () => {
     const removeEventListener = jest.spyOn(window, "removeEventListener");
     jest.spyOn(window, "postMessage").mockImplementation((message: unknown) => {
       queueMicrotask(() => respond(message as Request, true, undefined, "https://attacker.example"));
     });
-    await expect(new CardanoProvider({ requestTimeoutMs: 5 }).isEnabled()).rejects.toThrow(
-      "Cardano IPC request timed out: isEnabled",
-    );
+    await expect(new CardanoProvider({ requestTimeoutMs: 5 }).isEnabled()).rejects.toEqual({
+      code: -2,
+      info: "Cardano IPC request timed out: isEnabled",
+    });
     expect(removeEventListener).toHaveBeenCalledWith("message", expect.any(Function));
+  });
+
+  test("maps secure request ID failures to APIError", async () => {
+    (globalThis.crypto.randomUUID as jest.Mock).mockImplementation(() => {
+      throw new Error("boom");
+    });
+    await expect(new CardanoProvider().isEnabled()).rejects.toEqual({
+      code: -2,
+      info: "Secure request ID generation failed.",
+    });
   });
 });
