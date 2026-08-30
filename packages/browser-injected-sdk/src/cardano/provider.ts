@@ -19,7 +19,7 @@ export interface APIError {
   info: string;
 }
 export interface TxSignError {
-  code: 1 | 2;
+  code: 1 | 2 | 3;
   info: string;
 }
 export interface DataSignError {
@@ -36,10 +36,6 @@ export interface PaginateError {
 export type PubDRepKey = string;
 export type DRepID = string;
 export type PubStakeKey = string;
-export interface CIP95TxSignError {
-  code: 1 | 2 | 3;
-  info: string;
-}
 export interface CIP95API {
   getPubDRepKey(): Promise<PubDRepKey>;
   getUnregisteredPubStakeKeys(): Promise<PubStakeKey[]>;
@@ -80,6 +76,7 @@ interface ChromeRuntime {
 }
 export interface CardanoProviderOptions {
   requestTimeoutMs?: number;
+  supportedExtensions?: Extension[];
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -106,17 +103,21 @@ export class CardanoProvider {
   public readonly icon = PHANTOM_ICON;
   public readonly apiVersion = "1";
   private readonly requestTimeoutMs: number;
+  private readonly enabledCapabilities: Extension[];
 
   constructor(options: CardanoProviderOptions = {}) {
     const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     if (!Number.isFinite(requestTimeoutMs) || requestTimeoutMs < 0) {
       throw new TypeError("requestTimeoutMs must be a non-negative finite number.");
     }
+    const supportedExtensions = options.supportedExtensions ?? [];
+    assertExtensions(supportedExtensions);
     this.requestTimeoutMs = requestTimeoutMs;
+    this.enabledCapabilities = supportedExtensions.map(({ cip }) => ({ cip }));
   }
 
   public get supportedExtensions(): Extension[] {
-    return [{ cip: CIP95 }];
+    return this.enabledCapabilities.map(({ cip }) => ({ cip }));
   }
 
   public async isEnabled(): Promise<boolean> {
@@ -134,7 +135,9 @@ export class CardanoProvider {
     if (!enabled) throw { code: -3, info: "User declined enablement." } satisfies APIError;
     const enabledExtensions = typeof response === "boolean" ? [] : (response.extensions ?? []).filter(isExtension);
     const cip95Enabled =
-      extensions.some(({ cip }) => cip === CIP95) && enabledExtensions.some(({ cip }) => cip === CIP95);
+      this.enabledCapabilities.some(({ cip }) => cip === CIP95) &&
+      extensions.some(({ cip }) => cip === CIP95) &&
+      enabledExtensions.some(({ cip }) => cip === CIP95);
 
     const api: CardanoAPI = {
       getExtensions: () => this._sendIPC<Extension[]>("getExtensions"),
@@ -151,10 +154,16 @@ export class CardanoProvider {
       submitTx: (tx: string) => this._sendIPC<string>("submitTx", { tx }),
     };
     if (cip95Enabled) {
-      api.getRegisteredPubStakeKeys = () => this._sendIPC<PubStakeKey[]>("getRegisteredPubStakeKeys");
+      const noArgs =
+        <T>(method: string) =>
+        (...args: unknown[]): Promise<T> =>
+          args.length > 0
+            ? Promise.reject({ code: -1, info: `${method} does not accept arguments.` } satisfies APIError)
+            : this._sendIPC<T>(method);
+      api.getRegisteredPubStakeKeys = noArgs<PubStakeKey[]>("getRegisteredPubStakeKeys");
       api.cip95 = {
-        getPubDRepKey: () => this._sendIPC<PubDRepKey>("cip95.getPubDRepKey"),
-        getUnregisteredPubStakeKeys: () => this._sendIPC<PubStakeKey[]>("cip95.getUnregisteredPubStakeKeys"),
+        getPubDRepKey: noArgs<PubDRepKey>("cip95.getPubDRepKey"),
+        getUnregisteredPubStakeKeys: noArgs<PubStakeKey[]>("cip95.getUnregisteredPubStakeKeys"),
         signData: (addr: string, payload: string) => this._sendIPC<DataSignature>("cip95.signData", { addr, payload }),
       };
     }
