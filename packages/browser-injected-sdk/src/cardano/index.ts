@@ -6,7 +6,6 @@ export {
   type CardanoAPI,
   type CardanoProviderOptions,
   type CIP95API,
-  type CIP95TxSignError,
   type DataSignature,
   type DataSignError,
   type EnableOptions,
