@@ -33,6 +33,18 @@ export interface TxSendError {
 export interface PaginateError {
   maxSize: number;
 }
+export type PubDRepKey = string;
+export type DRepID = string;
+export type PubStakeKey = string;
+export interface CIP95TxSignError {
+  code: 1 | 2 | 3;
+  info: string;
+}
+export interface CIP95API {
+  getPubDRepKey(): Promise<PubDRepKey>;
+  getUnregisteredPubStakeKeys(): Promise<PubStakeKey[]>;
+  signData(addr: string, payload: string): Promise<DataSignature>;
+}
 
 export interface CardanoAPI {
   getExtensions(): Promise<Extension[]>;
@@ -46,6 +58,8 @@ export interface CardanoAPI {
   signTx(tx: string, partialSign?: boolean): Promise<string>;
   signData(addr: string, payload: string): Promise<DataSignature>;
   submitTx(tx: string): Promise<string>;
+  getRegisteredPubStakeKeys?: () => Promise<PubStakeKey[]>;
+  cip95?: CIP95API;
 }
 
 interface EnableResult {
@@ -69,6 +83,7 @@ export interface CardanoProviderOptions {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const CIP95 = 95;
 
 function isExtension(value: unknown): value is Extension {
   return (
@@ -101,7 +116,7 @@ export class CardanoProvider {
   }
 
   public get supportedExtensions(): Extension[] {
-    return [];
+    return [{ cip: CIP95 }];
   }
 
   public async isEnabled(): Promise<boolean> {
@@ -117,6 +132,9 @@ export class CardanoProvider {
     const response = await this._sendIPC<boolean | EnableResult>("enable", { extensions });
     const enabled = typeof response === "boolean" ? response : response.enabled;
     if (!enabled) throw { code: -3, info: "User declined enablement." } satisfies APIError;
+    const enabledExtensions = typeof response === "boolean" ? [] : (response.extensions ?? []).filter(isExtension);
+    const cip95Enabled =
+      extensions.some(({ cip }) => cip === CIP95) && enabledExtensions.some(({ cip }) => cip === CIP95);
 
     const api: CardanoAPI = {
       getExtensions: () => this._sendIPC<Extension[]>("getExtensions"),
@@ -132,6 +150,14 @@ export class CardanoProvider {
       signData: (addr: string, payload: string) => this._sendIPC<DataSignature>("signData", { addr, payload }),
       submitTx: (tx: string) => this._sendIPC<string>("submitTx", { tx }),
     };
+    if (cip95Enabled) {
+      api.getRegisteredPubStakeKeys = () => this._sendIPC<PubStakeKey[]>("getRegisteredPubStakeKeys");
+      api.cip95 = {
+        getPubDRepKey: () => this._sendIPC<PubDRepKey>("cip95.getPubDRepKey"),
+        getUnregisteredPubStakeKeys: () => this._sendIPC<PubStakeKey[]>("cip95.getUnregisteredPubStakeKeys"),
+        signData: (addr: string, payload: string) => this._sendIPC<DataSignature>("cip95.signData", { addr, payload }),
+      };
+    }
     return api;
   }
 
