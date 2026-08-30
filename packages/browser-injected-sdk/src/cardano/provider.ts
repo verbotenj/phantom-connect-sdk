@@ -19,7 +19,7 @@ export interface APIError {
   info: string;
 }
 export interface TxSignError {
-  code: 1 | 2 | 3;
+  code: 1 | 2;
   info: string;
 }
 export interface DataSignError {
@@ -74,6 +74,7 @@ function isExtension(value: unknown): value is Extension {
   return (
     typeof value === "object" &&
     value !== null &&
+    Object.keys(value).length === 1 &&
     Number.isSafeInteger((value as Extension).cip) &&
     (value as Extension).cip >= 0
   );
@@ -89,11 +90,18 @@ export class CardanoProvider {
   public readonly name = "Phantom";
   public readonly icon = PHANTOM_ICON;
   public readonly apiVersion = "1";
-  public readonly supportedExtensions: readonly Extension[] = Object.freeze([]);
   private readonly requestTimeoutMs: number;
 
   constructor(options: CardanoProviderOptions = {}) {
-    this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    if (!Number.isFinite(requestTimeoutMs) || requestTimeoutMs < 0) {
+      throw new TypeError("requestTimeoutMs must be a non-negative finite number.");
+    }
+    this.requestTimeoutMs = requestTimeoutMs;
+  }
+
+  public get supportedExtensions(): Extension[] {
+    return [];
   }
 
   public async isEnabled(): Promise<boolean> {
@@ -101,6 +109,9 @@ export class CardanoProvider {
   }
 
   public async enable(options: EnableOptions = {}): Promise<CardanoAPI> {
+    if (typeof options !== "object" || options === null || Array.isArray(options)) {
+      throw { code: -1, info: "Invalid enable options." } satisfies APIError;
+    }
     const extensions = options.extensions ?? [];
     assertExtensions(extensions);
     const response = await this._sendIPC<boolean | EnableResult>("enable", { extensions });
@@ -126,7 +137,14 @@ export class CardanoProvider {
 
   private _sendIPC<T>(method: string, params?: unknown): Promise<T> {
     return new Promise((resolve, reject) => {
-      const requestId = globalThis.crypto.randomUUID();
+      const internalError = (info: string): APIError => ({ code: -2, info });
+      let requestId: string;
+      try {
+        requestId = globalThis.crypto.randomUUID();
+      } catch {
+        reject(internalError("Secure request ID generation failed."));
+        return;
+      }
       let settled = false;
       const cleanup = () => {
         window.removeEventListener("message", handleMessage);
@@ -139,25 +157,24 @@ export class CardanoProvider {
         if (response.error !== undefined) reject(response.error);
         else resolve(response.result as T);
       };
-      const isMatchingResponse = (value: unknown): value is IPCResponse<T> => {
+      const hasRequestId = (value: unknown): value is Pick<IPCResponse<T>, "requestId"> & Partial<IPCResponse<T>> => {
         if (typeof value !== "object" || value === null) return false;
         const response = value as Partial<IPCResponse<T>>;
-        return (
-          response.sender === "phantom-extension" &&
-          response.target === "phantom-sdk" &&
-          response.channel === "cardano" &&
-          response.requestId === requestId
-        );
+        return response.requestId === requestId;
+      };
+      const isWindowResponse = (value: unknown): value is IPCResponse<T> => {
+        if (!hasRequestId(value)) return false;
+        return value.sender === "phantom-extension" && value.target === "phantom-sdk" && value.channel === "cardano";
       };
       const handleMessage = (event: MessageEvent) => {
         if (event.source !== window || event.origin !== window.location.origin) return;
-        if (isMatchingResponse(event.data)) settle(event.data);
+        if (isWindowResponse(event.data)) settle(event.data);
       };
       const timeoutId = window.setTimeout(() => {
         if (settled) return;
         settled = true;
         cleanup();
-        reject(new Error(`Cardano IPC request timed out: ${method}`));
+        reject(internalError(`Cardano IPC request timed out: ${method}`));
       }, this.requestTimeoutMs);
 
       window.addEventListener("message", handleMessage);
@@ -173,7 +190,7 @@ export class CardanoProvider {
       if (runtime?.sendMessage) {
         try {
           runtime.sendMessage(payload, response => {
-            if (!runtime.lastError && isMatchingResponse(response)) settle(response);
+            if (!runtime.lastError && hasRequestId(response)) settle(response as IPCResponse<T>);
             else window.postMessage(payload, window.location.origin);
           });
           return;
