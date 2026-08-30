@@ -1,200 +1,166 @@
-/**
- * @file provider.ts
- * @description Standard CIP-30 compliant Cardano bridge provider for Phantom.
- * Delegates ledger methods to the private IPC messenger communicating with the Phantom browser extension.
- * Reference: CIP-0030 | Cardano dApp-Wallet Web Bridge (https://cips.cardano.org/cip/CIP-0030)
- */
-
 import { PHANTOM_ICON } from "@phantom/constants";
 
-/**
- * CIP-30 compliant Paginate parameter.
- */
 export interface Paginate {
   page: number;
   limit: number;
 }
-
-/**
- * CIP-30 compliant response for signData.
- */
+export interface Extension {
+  cip: number;
+}
+export interface EnableOptions {
+  extensions?: Extension[];
+}
 export interface DataSignature {
-  /**
-   * CBOR-encoded COSE_Sign1 signature string (Hex).
-   */
   signature: string;
-  /**
-   * CBOR-encoded COSE_Key string containing public key (Hex).
-   */
   key: string;
 }
+export interface APIError {
+  code: -1 | -2 | -3 | -4;
+  info: string;
+}
+export interface TxSignError {
+  code: 1 | 2 | 3;
+  info: string;
+}
+export interface DataSignError {
+  code: 1 | 2 | 3;
+  info: string;
+}
+export interface TxSendError {
+  code: 1 | 2;
+  info: string;
+}
+export interface PaginateError {
+  maxSize: number;
+}
 
-/**
- * Full CIP-30 API returned upon successful execution of enable().
- */
 export interface CardanoAPI {
-  /**
-   * Returns the network ID: 0 for Testnet/Preprod/Preview, 1 for Mainnet.
-   * @returns {Promise<number>} Network ID.
-   */
+  getExtensions(): Promise<Extension[]>;
   getNetworkId(): Promise<number>;
-
-  /**
-   * Returns the total balance available of the wallet.
-   * @returns {Promise<string>} CBOR-encoded Value (Hex).
-   */
   getBalance(): Promise<string>;
-
-  /**
-   * Returns a list of UTXOs owned by the wallet.
-   * @param {string} [amount] Optional hex-encoded CBOR Value to filter UTXOs that can satisfy the amount.
-   * @param {Paginate} [paginate] Optional pagination parameters.
-   * @returns {Promise<string[] | null>} Array of hex-encoded CBOR TransactionUnspentOutput, or null if empty.
-   */
   getUtxos(amount?: string, paginate?: Paginate): Promise<string[] | null>;
-
-  /**
-   * Returns the change address of the wallet.
-   * @returns {Promise<string>} Hex-encoded CBOR change Address.
-   */
+  getUsedAddresses(paginate?: Paginate): Promise<string[]>;
+  getUnusedAddresses(): Promise<string[]>;
   getChangeAddress(): Promise<string>;
-
-  /**
-   * Returns the reward/stake addresses associated with the wallet.
-   * @returns {Promise<string[]>} Array of hex-encoded CBOR reward/stake Addresses.
-   */
   getRewardAddresses(): Promise<string[]>;
-
-  /**
-   * Requests the wallet to sign a transaction.
-   * @param {string} tx CBOR-encoded TransactionBody or Transaction (Hex).
-   * @param {boolean} [partialSign] Set to true if the dApp is doing a multi-sig or partial signing.
-   * @returns {Promise<string>} CBOR-encoded TransactionWitnessSet (Hex).
-   */
   signTx(tx: string, partialSign?: boolean): Promise<string>;
-
-  /**
-   * Requests the wallet to sign generic data using COSE_Sign1.
-   * @param {string} addr Address (Hex) or Stake Address (Hex) to sign with.
-   * @param {string} sigStructure Arbitrary data payload (Hex).
-   * @returns {Promise<DataSignature>} Signed signature payload.
-   */
-  signData(addr: string, sigStructure: string): Promise<DataSignature>;
-
-  /**
-   * Submits a signed transaction to the Cardano network.
-   * @param {string} tx CBOR-encoded Transaction (Hex).
-   * @returns {Promise<string>} Transaction ID (hash) as hex string.
-   */
+  signData(addr: string, payload: string): Promise<DataSignature>;
   submitTx(tx: string): Promise<string>;
 }
 
-/**
- * Standard CIP-30 'window.cardano.phantom' bridge class.
- */
+interface EnableResult {
+  enabled: boolean;
+  extensions?: Extension[];
+}
+interface IPCResponse<T> {
+  sender: "phantom-extension";
+  target: "phantom-sdk";
+  channel: "cardano";
+  requestId: string;
+  result?: T;
+  error?: unknown;
+}
+interface ChromeRuntime {
+  lastError?: unknown;
+  sendMessage: (payload: unknown, callback: (response?: unknown) => void) => void;
+}
+export interface CardanoProviderOptions {
+  requestTimeoutMs?: number;
+}
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+function isExtension(value: unknown): value is Extension {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Number.isSafeInteger((value as Extension).cip) &&
+    (value as Extension).cip >= 0
+  );
+}
+
+function assertExtensions(extensions: Extension[]): void {
+  if (!Array.isArray(extensions) || !extensions.every(isExtension)) {
+    throw { code: -1, info: "Invalid extensions request." } satisfies APIError;
+  }
+}
+
 export class CardanoProvider {
-  /**
-   * The name of the wallet provider.
-   */
-  public readonly name: string = "Phantom";
+  public readonly name = "Phantom";
+  public readonly icon = PHANTOM_ICON;
+  public readonly apiVersion = "1";
+  public readonly supportedExtensions: readonly Extension[] = Object.freeze([]);
+  private readonly requestTimeoutMs: number;
 
-  /**
-   * SVG base64 URL icon of the wallet provider.
-   */
-  public readonly icon: string = PHANTOM_ICON;
-
-  /**
-   * CIP-30 Bridge API Version.
-   */
-  public readonly apiVersion: string = "1.0.0";
-
-  /**
-   * Internal connection state.
-   */
-  private _isEnabled: boolean = false;
-
-  constructor() {}
-
-  /**
-   * Checks if the Phantom Cardano bridge is enabled (connected) to the current site.
-   * @returns {Promise<boolean>} True if enabled, false otherwise.
-   */
-  public async isEnabled(): Promise<boolean> {
-    try {
-      const isEnabledResult = await this._sendIPC<boolean>("isEnabled");
-      this._isEnabled = !!isEnabledResult;
-      return this._isEnabled;
-    } catch (err) {
-      return false;
-    }
+  constructor(options: CardanoProviderOptions = {}) {
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   }
 
-  /**
-   * Enables (connects) the Phantom Cardano bridge for the current site.
-   * If successful, returns the full CIP-30 Cardano API.
-   * @returns {Promise<CardanoAPI>} Full Cardano API instance.
-   */
-  public async enable(): Promise<CardanoAPI> {
-    const success = await this._sendIPC<boolean>("enable");
-    if (!success) {
-      throw new Error("CIP-30 Connection Refused: User declined enablement.");
-    }
-    this._isEnabled = true;
+  public async isEnabled(): Promise<boolean> {
+    return this._sendIPC<boolean>("isEnabled");
+  }
 
-    // Return the standard Cardano API instance
-    return {
+  public async enable(options: EnableOptions = {}): Promise<CardanoAPI> {
+    const extensions = options.extensions ?? [];
+    assertExtensions(extensions);
+    const response = await this._sendIPC<boolean | EnableResult>("enable", { extensions });
+    const enabled = typeof response === "boolean" ? response : response.enabled;
+    if (!enabled) throw { code: -3, info: "User declined enablement." } satisfies APIError;
+
+    const api: CardanoAPI = {
+      getExtensions: () => this._sendIPC<Extension[]>("getExtensions"),
       getNetworkId: () => this._sendIPC<number>("getNetworkId"),
       getBalance: () => this._sendIPC<string>("getBalance"),
       getUtxos: (amount?: string, paginate?: Paginate) =>
         this._sendIPC<string[] | null>("getUtxos", { amount, paginate }),
+      getUsedAddresses: (paginate?: Paginate) => this._sendIPC<string[]>("getUsedAddresses", { paginate }),
+      getUnusedAddresses: () => this._sendIPC<string[]>("getUnusedAddresses"),
       getChangeAddress: () => this._sendIPC<string>("getChangeAddress"),
       getRewardAddresses: () => this._sendIPC<string[]>("getRewardAddresses"),
-      signTx: (tx: string, partialSign?: boolean) =>
-        this._sendIPC<string>("signTx", { tx, partialSign }),
-      signData: (addr: string, sigStructure: string) =>
-        this._sendIPC<DataSignature>("signData", { addr, sigStructure }),
+      signTx: (tx: string, partialSign?: boolean) => this._sendIPC<string>("signTx", { tx, partialSign }),
+      signData: (addr: string, payload: string) => this._sendIPC<DataSignature>("signData", { addr, payload }),
       submitTx: (tx: string) => this._sendIPC<string>("submitTx", { tx }),
     };
+    return api;
   }
 
-  /**
-   * Sends an IPC message payload to the Phantom extension.
-   * Supports both standard window.postMessage and chrome.runtime.sendMessage if available.
-   *
-   * @private
-   * @template T
-   * @param {string} method IPC method name.
-   * @param {any} [params] Parameters to send.
-   * @returns {Promise<T>} Resolves with response from the extension.
-   */
-  private _sendIPC<T>(method: string, params?: any): Promise<T> {
+  private _sendIPC<T>(method: string, params?: unknown): Promise<T> {
     return new Promise((resolve, reject) => {
-      // Create a unique request ID to match with incoming response
-      const requestId = Math.random().toString(36).substring(2, 15);
-
-      const handleMessage = (event: MessageEvent) => {
-        // Enforce safety checks on message origin
-        if (event.source !== window) return;
-
-        const data = event.data;
-        if (
-          data &&
-          data.sender === "phantom-extension" &&
-          data.channel === "cardano" &&
-          data.requestId === requestId
-        ) {
-          window.removeEventListener("message", handleMessage);
-          if (data.error) {
-            reject(new Error(data.error));
-          } else {
-            resolve(data.result);
-          }
-        }
+      const requestId = globalThis.crypto.randomUUID();
+      let settled = false;
+      const cleanup = () => {
+        window.removeEventListener("message", handleMessage);
+        window.clearTimeout(timeoutId);
       };
+      const settle = (response: IPCResponse<T>) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (response.error !== undefined) reject(response.error);
+        else resolve(response.result as T);
+      };
+      const isMatchingResponse = (value: unknown): value is IPCResponse<T> => {
+        if (typeof value !== "object" || value === null) return false;
+        const response = value as Partial<IPCResponse<T>>;
+        return (
+          response.sender === "phantom-extension" &&
+          response.target === "phantom-sdk" &&
+          response.channel === "cardano" &&
+          response.requestId === requestId
+        );
+      };
+      const handleMessage = (event: MessageEvent) => {
+        if (event.source !== window || event.origin !== window.location.origin) return;
+        if (isMatchingResponse(event.data)) settle(event.data);
+      };
+      const timeoutId = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error(`Cardano IPC request timed out: ${method}`));
+      }, this.requestTimeoutMs);
 
-      // Register the event listener to catch the response
       window.addEventListener("message", handleMessage);
-
       const payload = {
         sender: "phantom-sdk",
         target: "phantom-extension",
@@ -203,35 +169,19 @@ export class CardanoProvider {
         method,
         params,
       };
-
-      // Attempt to communicate via chrome.runtime if extension context (e.g. content script context)
-      if (
-        typeof chrome !== "undefined" &&
-        chrome.runtime &&
-        typeof chrome.runtime.sendMessage === "function"
-      ) {
+      const runtime = (globalThis as typeof globalThis & { chrome?: { runtime?: ChromeRuntime } }).chrome?.runtime;
+      if (runtime?.sendMessage) {
         try {
-          chrome.runtime.sendMessage(payload, (response: any) => {
-            if (chrome.runtime.lastError) {
-              // Fail silently and fall back to postMessage
-              window.postMessage(payload, "*");
-            } else if (response && response.requestId === requestId) {
-              window.removeEventListener("message", handleMessage);
-              if (response.error) {
-                reject(new Error(response.error));
-              } else {
-                resolve(response.result);
-              }
-            }
+          runtime.sendMessage(payload, response => {
+            if (!runtime.lastError && isMatchingResponse(response)) settle(response);
+            else window.postMessage(payload, window.location.origin);
           });
           return;
-        } catch (e) {
-          // Fallback to window.postMessage on exception
+        } catch {
+          // Use the page bridge when extension messaging is unavailable.
         }
       }
-
-      // Default fallback: window.postMessage
-      window.postMessage(payload, "*");
+      window.postMessage(payload, window.location.origin);
     });
   }
 }
