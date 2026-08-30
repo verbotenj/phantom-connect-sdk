@@ -51,7 +51,11 @@ describe("CardanoProvider", () => {
     const provider = new CardanoProvider();
     expect(provider.name).toBe("Phantom");
     expect(provider.apiVersion).toBe("1");
-    expect(provider.supportedExtensions).toEqual([{ cip: 95 }]);
+    expect(provider.supportedExtensions).toEqual([]);
+    const governanceProvider = new CardanoProvider({ supportedExtensions: [{ cip: 95 }] });
+    expect(governanceProvider.supportedExtensions).toEqual([{ cip: 95 }]);
+    governanceProvider.supportedExtensions.length = 0;
+    expect(governanceProvider.supportedExtensions).toEqual([{ cip: 95 }]);
   });
 
   test("requests extensions and exposes the complete base API", async () => {
@@ -107,7 +111,9 @@ describe("CardanoProvider", () => {
     bridge(request => ({
       result: request.method === "enable" ? { enabled: true, extensions: [{ cip: 95 }] } : "result",
     }));
-    const api = await new CardanoProvider().enable({ extensions: [{ cip: 95 }] });
+    const api = await new CardanoProvider({ supportedExtensions: [{ cip: 95 }] }).enable({
+      extensions: [{ cip: 95 }],
+    });
 
     expect(api.getRegisteredPubStakeKeys).toBeDefined();
     expect(api.cip95).toBeDefined();
@@ -131,7 +137,7 @@ describe("CardanoProvider", () => {
     [{ enabled: true, extensions: [] }, [{ cip: 95 }]],
   ])("does not expose unnegotiated CIP-95 for response %p and request %p", async (response, extensions) => {
     bridge(request => ({ result: request.method === "enable" ? response : undefined }));
-    const api = await new CardanoProvider().enable({ extensions });
+    const api = await new CardanoProvider({ supportedExtensions: [{ cip: 95 }] }).enable({ extensions });
     expect(api.getRegisteredPubStakeKeys).toBeUndefined();
     expect(api.cip95).toBeUndefined();
   });
@@ -141,8 +147,26 @@ describe("CardanoProvider", () => {
     bridge(request =>
       request.method === "enable" ? { result: { enabled: true, extensions: [{ cip: 95 }] } } : { error },
     );
-    const api = await new CardanoProvider().enable({ extensions: [{ cip: 95 }] });
+    const api = await new CardanoProvider({ supportedExtensions: [{ cip: 95 }] }).enable({
+      extensions: [{ cip: 95 }],
+    });
     await expect(api.signTx("84a0")).rejects.toEqual(error);
+  });
+
+  test("rejects arguments passed to zero-argument CIP-95 methods", async () => {
+    bridge(request => ({
+      result: request.method === "enable" ? { enabled: true, extensions: [{ cip: 95 }] } : "result",
+    }));
+    const api = await new CardanoProvider({ supportedExtensions: [{ cip: 95 }] }).enable({
+      extensions: [{ cip: 95 }],
+    });
+    const calls = [api.getRegisteredPubStakeKeys, api.cip95?.getPubDRepKey, api.cip95?.getUnregisteredPubStakeKeys];
+    for (const call of calls) {
+      await expect((call as unknown as (arg: string) => Promise<unknown>)("unexpected")).rejects.toMatchObject({
+        code: -1,
+      });
+    }
+    expect((window.postMessage as jest.Mock).mock.calls).toHaveLength(1);
   });
 
   test("preserves structured wallet errors", async () => {
