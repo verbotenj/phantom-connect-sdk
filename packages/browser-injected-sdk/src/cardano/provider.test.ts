@@ -51,7 +51,7 @@ describe("CardanoProvider", () => {
     const provider = new CardanoProvider();
     expect(provider.name).toBe("Phantom");
     expect(provider.apiVersion).toBe("1");
-    expect(provider.supportedExtensions).toEqual([]);
+    expect(provider.supportedExtensions).toEqual([{ cip: 95 }]);
   });
 
   test("requests extensions and exposes the complete base API", async () => {
@@ -101,6 +101,48 @@ describe("CardanoProvider", () => {
     expect(requests[3]).toMatchObject({ method: "signTx", params: { tx: "84a0", partialSign: true } });
     expect(requests[4]).toMatchObject({ method: "signData", params: { addr: "00", payload: "deadbeef" } });
     expect(requests[5]).toMatchObject({ method: "submitTx", params: { tx: "84a0" } });
+  });
+
+  test("exposes CIP-95 only after explicit successful negotiation", async () => {
+    bridge(request => ({
+      result: request.method === "enable" ? { enabled: true, extensions: [{ cip: 95 }] } : "result",
+    }));
+    const api = await new CardanoProvider().enable({ extensions: [{ cip: 95 }] });
+
+    expect(api.getRegisteredPubStakeKeys).toBeDefined();
+    expect(api.cip95).toBeDefined();
+    await api.getRegisteredPubStakeKeys?.();
+    await api.cip95?.getPubDRepKey();
+    await api.cip95?.getUnregisteredPubStakeKeys();
+    await api.cip95?.signData("aabb", "deadbeef");
+
+    const requests = (window.postMessage as jest.Mock).mock.calls.map(([request]) => request);
+    expect(requests.slice(1)).toEqual([
+      expect.objectContaining({ method: "getRegisteredPubStakeKeys", params: undefined }),
+      expect.objectContaining({ method: "cip95.getPubDRepKey", params: undefined }),
+      expect.objectContaining({ method: "cip95.getUnregisteredPubStakeKeys", params: undefined }),
+      expect.objectContaining({ method: "cip95.signData", params: { addr: "aabb", payload: "deadbeef" } }),
+    ]);
+  });
+
+  test.each([
+    [{ enabled: true, extensions: [{ cip: 95 }] }, []],
+    [true, [{ cip: 95 }]],
+    [{ enabled: true, extensions: [] }, [{ cip: 95 }]],
+  ])("does not expose unnegotiated CIP-95 for response %p and request %p", async (response, extensions) => {
+    bridge(request => ({ result: request.method === "enable" ? response : undefined }));
+    const api = await new CardanoProvider().enable({ extensions });
+    expect(api.getRegisteredPubStakeKeys).toBeUndefined();
+    expect(api.cip95).toBeUndefined();
+  });
+
+  test("preserves the CIP-95 deprecated-certificate signing error", async () => {
+    const error = { code: 3, info: "Deprecated certificate." };
+    bridge(request =>
+      request.method === "enable" ? { result: { enabled: true, extensions: [{ cip: 95 }] } } : { error },
+    );
+    const api = await new CardanoProvider().enable({ extensions: [{ cip: 95 }] });
+    await expect(api.signTx("84a0")).rejects.toEqual(error);
   });
 
   test("preserves structured wallet errors", async () => {
